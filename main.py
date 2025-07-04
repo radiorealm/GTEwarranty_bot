@@ -2,12 +2,16 @@ import telebot
 from telebot import types
 from fpdf import FPDF
 import os
+import tempfile
+import smtplib
+from email.message import EmailMessage
 
 bot = telebot.TeleBot("7955924179:AAFiaz3iF4nSfx7PNaW9jNPnasidu1zYZ1k")
 
 user_states = {}
 
 questions = [
+    ("sender_name", "Введите ФИО отправителя:"),
     ("company_name", "Введите название компании, отправляющей заявление:"),
     ("project_name", "Введите название проекта:"),
     ("engine_number", "Введите номер двигателя:"),
@@ -19,6 +23,12 @@ questions = [
 ]
 
 SPARE_PARTS_STAGE = 'spare_parts_stage'
+
+SMTP_SERVER = "smtp-mail.outlook.com"  # Замените на ваш SMTP сервер
+SMTP_PORT = 587  # Обычно 587 для TLS
+SMTP_USER = "warranty@gte.su"  # Ваш email
+SMTP_PASSWORD = "7d2758Pz7"  # Ваш пароль или app password
+# ============================
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -63,7 +73,7 @@ def ask_spare_part(message):
     if stage == 0:
         bot.send_message(user_id, "Каталожный номер:", reply_markup=markup)
     elif stage == 1:
-        bot.send_message(user_id, "Название:", reply_markup=markup)
+        bot.send_message(user_id, "Наименование:", reply_markup=markup)
     elif stage == 2:
         bot.send_message(user_id, "Количество:", reply_markup=markup)
     elif stage == 3:
@@ -159,7 +169,14 @@ def handle_files(message):
         bot.reply_to(message, f"Документ '{file_name}' добавлен.")
     elif message.content_type == 'photo':
         file_id = message.photo[-1].file_id
-        state["files"].append({"type": "photo", "file_id": file_id})
+        # Скачиваем фото во временный файл
+        file_info = bot.get_file(file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        temp_dir = tempfile.gettempdir()
+        photo_path = os.path.join(temp_dir, f"{file_id}.jpg")
+        with open(photo_path, 'wb') as new_file:
+            new_file.write(downloaded_file)
+        state["files"].append({"type": "photo", "file_id": file_id, "photo_path": photo_path})
         bot.reply_to(message, "Фото добавлено.")
 
 @bot.message_handler(func=lambda message: user_states.get(message.from_user.id, {}).get("attaching_files"))
@@ -174,58 +191,160 @@ def handle_finish_attach(message):
         state.pop("files", None)
 
         data = state["data"]
-        file_path = generate_pdf(data)
+        file_path, temp_photos = generate_pdf(data)
 
         with open(file_path, "rb") as pdf_file:
             bot.send_document(user_id, pdf_file)
 
+        # Формируем тему письма
+        from datetime import datetime
+        today = datetime.today().strftime('%d.%m.%Y')
+        subject = f"Гарантийный случай {data.get('company_name', '-')} {today}"
+        body = f"Поступило новое гарантийное заявление от {data.get('company_name', '-')}, проект: {data.get('project_name', '-')}."
+        send_pdf_to_email(file_path, subject, body, "warranty@gte.su")
+
         bot.send_message(user_id, "Спасибо! Ваше заявление сформировано и отправлено в виде PDF.")
         user_states.pop(user_id, None)
         os.remove(file_path)
+        # Удаляем временные фото
+        for p in temp_photos:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        # Автоматический рестарт: предлагаем начать заново
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        btn1 = types.KeyboardButton("Начать заполнение")
+        markup.add(btn1)
+        bot.send_message(user_id, "Хотите подать новое заявление? Нажмите 'Начать заполнение'.", reply_markup=markup)
 
-# Функция генерации PDF
 def generate_pdf(data):
+    from datetime import datetime
     pdf = FPDF()
     pdf.add_page()
     pdf.add_font('Arial', '', 'arial.ttf', uni=True)
-    pdf.set_font('Arial', '', 12)
+    pdf.add_font('Arial', 'B', 'arialbd.ttf', uni=True)
+    pdf.set_font('Arial', '', 11)
 
-    def write_line(label, value=""):
-        pdf.set_font("Arial", style="B", size=12)
-        pdf.cell(60, 10, txt=label, ln=0)
-        pdf.set_font("Arial", size=12)
-        pdf.multi_cell(0, 10, txt=value if value else "-")
+    today = datetime.today().strftime('%d.%m.%Y')
 
-    pdf.cell(0, 10, txt="Заявление о гарантийном случае", ln=1, align="C")
+    # Заголовок
+    pdf.set_font('Arial', 'B', 12)
+    pdf.cell(0, 10, txt=f"Заявление о гарантийном случае от {today}", ln=1, align="C")
 
-    write_line("Название компании:", data.get("company_name", "-"))
-    write_line("Название проекта:", data.get("project_name", "-"))
-    write_line("Номер двигателя:", data.get("engine_number", "-"))
-    write_line("Номер проекта:", data.get("project_number", "-"))
-    write_line("Номер агрегата:", data.get("unit_number", "-"))
-    write_line("Наработка мотто-часов:", data.get("moto_hours", "-"))
-    write_line("Количество стартов:", data.get("start_count", "-"))
-    write_line("Описание проблемы:", data.get("problem_description", "-"))
+    pdf.set_font('Arial', '', 11)
+    pdf.ln(3)
+
+    # Таблица параметров в 4 колонки
+    def table_row(label1, val1, label2, val2):
+        pdf.cell(55, 8, label1, border=1)
+        pdf.cell(45, 8, val1 or "-", border=1)
+        pdf.cell(55, 8, label2, border=1)
+        pdf.cell(0, 8, val2 or "-", border=1, ln=1)
+
+    table_row("Название проекта", data.get("project_name", "-"),
+              "Номер двигателя", data.get("engine_number", "-"))
+    table_row("Номер проекта", data.get("project_number", "-"),
+              "Номер агрегата", data.get("unit_number", "-"))
+    table_row("Наработка мотто-часов", data.get("moto_hours", "-"),
+              "Количество стартов", data.get("start_count", "-"))
 
     pdf.ln(5)
-    pdf.set_font("Arial", style="B", size=12)
-    pdf.cell(0, 10, txt="Запасные части", ln=1)
-    pdf.set_font("Arial", size=12)
 
+    # Описание проблемы
+    pdf.set_font('Arial', '', 11)
+    pdf.cell(0, 8, "Описание проблемы:", ln=1, border=0)
+    pdf.multi_cell(0, 8, data.get("problem_description", "-"), border=1)
+
+    pdf.ln(5)
+
+    # Прилагаемые материалы
+    pdf.set_font('Arial', '', 11)
+    pdf.cell(0, 8, "Прилагаемые материалы:", ln=1, border=0)
+    files = data.get("attached_files", [])
+    temp_photos = []
+    if files:
+        photo_count = 1
+        for f in files:
+            if f['type'] == 'photo' and f.get('photo_path') and os.path.exists(f['photo_path']):
+                try:
+                    pdf.cell(0, 8, f"Фото {photo_count}", ln=1, border=1)
+                    # Вставляем фото, ширина 100мм, сохраняем пропорции
+                    pdf.image(f['photo_path'], w=100)
+                    temp_photos.append(f['photo_path'])
+                    photo_count += 1
+                except Exception:
+                    pdf.cell(0, 8, f"Фото {photo_count} (ошибка вставки)", ln=1, border=1)
+                    photo_count += 1
+            elif f['type'] == 'document':
+                label = f.get("file_name") or f["file_id"]
+                pdf.cell(0, 8, f"Документ: {label}", ln=1, border=1)
+    else:
+        pdf.cell(0, 8, "—", ln=1, border=1)
+
+    pdf.ln(5)
+
+    # Запасные части
+    pdf.set_font('Arial', '', 11)
+    pdf.cell(0, 8, "Запасные части, необходимые для устранения проблемы", ln=1, border=0)
     parts = data.get("spare_parts", [])
     if parts:
+        pdf.set_font('Arial', 'B', 11)
+        pdf.cell(60, 8, "Каталожный номер", border=1)
+        pdf.cell(80, 8, "Название", border=1)
+        pdf.cell(30, 8, "Количество", border=1, ln=1)
+        pdf.set_font('Arial', '', 11)
         for part in parts:
-            pdf.cell(0, 10, txt=f"{part['catalog']} | {part['name']} | {part['qty']}", ln=1)
+            pdf.cell(60, 8, part['catalog'], border=1)
+            pdf.cell(80, 8, part['name'], border=1)
+            pdf.cell(30, 8, part['qty'], border=1, ln=1)
     else:
-        pdf.cell(0, 10, txt="—", ln=1)
+        pdf.cell(0, 8, "—", ln=1, border=1)
 
     pdf.ln(10)
-    pdf.cell(0, 10, txt="Подпись: _______________________", ln=1)
-    pdf.cell(0, 10, txt="Дата: __________________________", ln=1)
 
-    file_path = f"/tmp/zayavlenie_{data.get('engine_number', 'no_engine')}.pdf"
+    # Подписи
+    pdf.set_font('Arial', '', 11)
+    pdf.cell(0, 8, "Подписи", ln=1, border=0)
+    pdf.ln(3)
+
+    company = data.get("company_name", "________________")
+    sender = data.get("sender_name", "_____________________")
+
+    pdf.cell(95, 8, company, ln=0)
+    pdf.cell(0, 8, "ООО «ГринТех Энерджи»", ln=1)
+
+    pdf.cell(95, 8, f"{sender}/______________/", ln=0)
+    pdf.cell(0, 8, "_____________________/______________/", ln=1)
+
+    pdf.cell(95, 8, f"Дата: {today}", ln=0)
+    pdf.cell(0, 8, "", ln=1)
+
+    file_path = f"zayavlenie_{data.get('engine_number', 'no_engine')}.pdf"
     pdf.output(file_path)
-    return file_path
+    return file_path, temp_photos
+
+def send_pdf_to_email(pdf_path, subject, body, to_email):
+    from_email = SMTP_USER
+    if not all([SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASSWORD]):
+        print('SMTP credentials are not set.')
+        return
+    msg = EmailMessage()
+    msg['Subject'] = subject
+    msg['From'] = from_email
+    msg['To'] = to_email
+    msg.set_content(body)
+    with open(pdf_path, 'rb') as f:
+        file_data = f.read()
+        file_name = os.path.basename(pdf_path)
+    msg.add_attachment(file_data, maintype='application', subtype='pdf', filename=file_name)
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+    except Exception as e:
+        print(f'Error sending email: {e}')
 
 if __name__ == '__main__':
     bot.polling(none_stop=True)
