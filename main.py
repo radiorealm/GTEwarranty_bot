@@ -1,10 +1,15 @@
 import telebot
 from telebot import types
-from fpdf import FPDF
 import os
 import tempfile
 import smtplib
 from email.message import EmailMessage
+from docx import Document
+from docx.shared import Pt, Cm, RGBColor, Mm
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+import datetime
 
 bot = telebot.TeleBot("7955924179:AAFiaz3iF4nSfx7PNaW9jNPnasidu1zYZ1k")
 
@@ -28,20 +33,31 @@ SMTP_SERVER = "smtp-mail.outlook.com"  # Замените на ваш SMTP се�
 SMTP_PORT = 587  # Обычно 587 для TLS
 SMTP_USER = "warranty@gte.su"  # Ваш email
 SMTP_PASSWORD = "7d2758Pz7"  # Ваш пароль или app password
+
+
 # ============================
 
 @bot.message_handler(commands=['start'])
 def start(message):
     user_states[message.from_user.id] = {"step": 0, "data": {}}
+    # Список вопросов
+    question_list = '\n'.join([f"{i + 1}. {q[1]}" for i, q in enumerate(questions)])
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     btn1 = types.KeyboardButton("Начать заполнение")
     markup.add(btn1)
-    bot.send_message(message.from_user.id, "Здравствуйте! Нажмите 'Начать заполнение' для подачи заявления.", reply_markup=markup)
+    full_text = (
+            "Перед заполнением ознакомьтесь со списком вопросов:\n\n"
+            + question_list +
+            "\n\nНажмите 'Начать заполнение' для подачи заявления."
+    )
+    bot.send_message(message.from_user.id, full_text, reply_markup=markup)
+
 
 @bot.message_handler(func=lambda message: message.text == "Начать заполнение")
 def begin_form(message):
     user_states[message.from_user.id] = {"step": 0, "data": {}}
     ask_next_question(message)
+
 
 def ask_next_question(message):
     user_id = message.from_user.id
@@ -59,6 +75,7 @@ def ask_next_question(message):
         state[SPARE_PARTS_STAGE] = {"stage": 0, "current": {}, "parts": []}
         bot.send_message(user_id, "Введите данные о запасных частях. Если не требуется — нажмите 'Пропустить'.")
         ask_spare_part(message)
+
 
 def ask_spare_part(message):
     user_id = message.from_user.id
@@ -82,14 +99,17 @@ def ask_spare_part(message):
         no_btn = types.KeyboardButton("Закончить ввод")
         markup.add(yes_btn, no_btn)
         part = sp["current"]
-        bot.send_message(user_id, f"Добавить ещё одну позицию?\nТекущая: {part['catalog']} | {part['name']} | {part['qty']}", reply_markup=markup)
+        bot.send_message(user_id,
+                         f"Добавить ещё одну позицию?\nТекущая: {part['catalog']} | {part['name']} | {part['qty']}",
+                         reply_markup=markup)
+
 
 @bot.message_handler(
     func=lambda message: (
-        user_states.get(message.from_user.id, {}).get("step") is not None
-        and user_states.get(message.from_user.id, {}).get("step") < len(questions)
-        and SPARE_PARTS_STAGE not in user_states.get(message.from_user.id, {})
-        and not user_states.get(message.from_user.id, {}).get("attaching_files")
+            user_states.get(message.from_user.id, {}).get("step") is not None
+            and user_states.get(message.from_user.id, {}).get("step") < len(questions)
+            and SPARE_PARTS_STAGE not in user_states.get(message.from_user.id, {})
+            and not user_states.get(message.from_user.id, {}).get("attaching_files")
     )
 )
 def handle_answers(message):
@@ -105,6 +125,7 @@ def handle_answers(message):
     state["data"][key] = answer
     state["step"] += 1
     ask_next_question(message)
+
 
 @bot.message_handler(func=lambda message: SPARE_PARTS_STAGE in user_states.get(message.from_user.id, {}))
 def handle_spare_parts(message):
@@ -145,16 +166,21 @@ def handle_spare_parts(message):
         else:
             ask_spare_part(message)
 
+
 def ask_next_question_after_spare_parts(message):
     user_id = message.from_user.id
     state = user_states.get(user_id)
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    finish_btn = types.KeyboardButton("Завершить прикрепление")
     skip_btn = types.KeyboardButton("Пропустить")
-    markup.add(finish_btn, skip_btn)
-    bot.send_message(user_id, "Прикрепите необходимые файлы (фото или документы). Когда закончите — нажмите 'Завершить прикрепление' или 'Пропустить'.", reply_markup=markup)
+    finish_btn = types.KeyboardButton("Завершить прикрепление")
+    # Сначала 'Пропустить', потом 'Завершить прикрепление' (справа)
+    markup.add(skip_btn, finish_btn)
+    bot.send_message(user_id,
+                     "Прикрепите необходимые файлы (фото или документы). Когда закончите — нажмите 'Завершить прикрепление' или 'Пропустить'.",
+                     reply_markup=markup)
     state["attaching_files"] = True
     state["files"] = []
+
 
 @bot.message_handler(content_types=['document', 'photo'])
 def handle_files(message):
@@ -177,7 +203,10 @@ def handle_files(message):
         with open(photo_path, 'wb') as new_file:
             new_file.write(downloaded_file)
         state["files"].append({"type": "photo", "file_id": file_id, "photo_path": photo_path})
-        bot.reply_to(message, "Фото добавлено.")
+        # Показываем пользователю само фото
+        with open(photo_path, 'rb') as photo_file:
+            bot.send_photo(user_id, photo_file, caption="Фото добавлено.")
+
 
 @bot.message_handler(func=lambda message: user_states.get(message.from_user.id, {}).get("attaching_files"))
 def handle_finish_attach(message):
@@ -191,140 +220,201 @@ def handle_finish_attach(message):
         state.pop("files", None)
 
         data = state["data"]
-        file_path, temp_photos = generate_pdf(data)
+        file_path_docx = generate_docx(data)
 
-        with open(file_path, "rb") as pdf_file:
-            bot.send_document(user_id, pdf_file)
+        with open(file_path_docx, "rb") as docx_file:
+            bot.send_document(user_id, docx_file)
 
-        # Формируем тему письма
-        from datetime import datetime
-        today = datetime.today().strftime('%d.%m.%Y')
-        subject = f"Гарантийный случай {data.get('company_name', '-')} {today}"
+        # Отправляем DOCX на почту
+        subject = "Новое гарантийное заявление"
         body = f"Поступило новое гарантийное заявление от {data.get('company_name', '-')}, проект: {data.get('project_name', '-')}."
-        send_pdf_to_email(file_path, subject, body, "warranty@gte.su")
+        send_files_to_email([file_path_docx], subject, body, "warranty@gte.su")
 
-        bot.send_message(user_id, "Спасибо! Ваше заявление сформировано и отправлено в виде PDF.")
+        bot.send_message(user_id, "Спасибо! Ваше заявление сформировано и отправлено в виде Word (docx).")
         user_states.pop(user_id, None)
-        os.remove(file_path)
-        # Удаляем временные фото
-        for p in temp_photos:
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+        os.remove(file_path_docx)
         # Автоматический рестарт: предлагаем начать заново
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         btn1 = types.KeyboardButton("Начать заполнение")
         markup.add(btn1)
         bot.send_message(user_id, "Хотите подать новое заявление? Нажмите 'Начать заполнение'.", reply_markup=markup)
 
-def generate_pdf(data):
-    from datetime import datetime
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.add_font('Arial', '', 'arial.ttf', uni=True)
-    pdf.add_font('Arial', 'B', 'arialbd.ttf', uni=True)
-    pdf.set_font('Arial', '', 11)
 
-    today = datetime.today().strftime('%d.%m.%Y')
+def generate_docx(data):
+    from docx import Document
+    from docx.shared import Pt, Cm, RGBColor
+    from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+    from docx.oxml.ns import qn
+    import datetime
+    from docx.shared import Mm
+
+    doc = Document()
+
+    # Установка полей документа
+    section = doc.sections[0]
+    section.top_margin = Cm(2)
+    section.bottom_margin = Cm(2)
+    section.left_margin = Cm(2)
+    section.right_margin = Cm(2)
+
+    def styled_run(paragraph, text, bold=False, italic=False, font_size=10):
+        run = paragraph.add_run(text)
+        run.font.name = 'Montserrat'
+        run._element.rPr.rFonts.set(qn('w:eastAsia'), 'Montserrat')
+        run.font.size = Pt(font_size)
+        run.bold = bold
+        run.italic = italic
+        # Одинарный межстрочный интервал
+        paragraph.paragraph_format.line_spacing = 1
+        return run
+
+    def center_paragraph(text, bold=False, font_size=10):
+        p = doc.add_paragraph()
+        p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        styled_run(p, text, bold=bold, font_size=font_size)
+        p.paragraph_format.line_spacing = 1
+        return p
+
+    # Добавляем изображение верхнего колонтитула
+    doc.add_picture('верхний колонтитул.png',
+                    width=doc.sections[0].page_width - doc.sections[0].left_margin - doc.sections[0].right_margin)
+
+    # Исходящий номер и дата
+    today = datetime.datetime.today()
+    p = doc.add_paragraph()
+    styled_run(p, f'Исх. №___ от «__» _____ {today.year} г.', font_size=10)
+    p.paragraph_format.line_spacing = 1
 
     # Заголовок
-    pdf.set_font('Arial', 'B', 12)
-    pdf.cell(0, 10, txt=f"Заявление о гарантийном случае от {today}", ln=1, align="C")
+    center_paragraph("Заявление", font_size=22)
+    center_paragraph("о гарантийном случае от Warranty case claim", font_size=11)
 
-    pdf.set_font('Arial', '', 11)
-    pdf.ln(3)
+    # Таблица параметров (8 строк, 3 колонки)
+    table = doc.add_table(rows=9, cols=3)
+    table.style = 'Table Grid'
+    col_widths = [Cm(0.8), Cm(8.0), Cm(8.0)]
+    params = [
+        ("1", "Название проекта\nProject name", data.get("project_name", "")),
+        ("2", "Номер проекта\nDesing number", data.get("project_number", "")),
+        ("3", "Номер двигателя\nEngine number", data.get("engine_number", "")),
+        ("4", "Номер агрегата\nUnit number", data.get("unit_number", "")),
+        ("5", "Наработка моточасов\nOph", data.get("moto_hours", "")),
+        ("6", "Количество стартов\nNumber of starts", data.get("start_count", "")),
+        ("7", "Описание проблемы\nProblem description", data.get("problem_description", "")),
+        ("8", "Прилагаемые материалы\nAttachments", None)
+    ]
 
-    # Таблица параметров в 4 колонки
-    def table_row(label1, val1, label2, val2):
-        pdf.cell(55, 8, label1, border=1)
-        pdf.cell(45, 8, val1 or "-", border=1)
-        pdf.cell(55, 8, label2, border=1)
-        pdf.cell(0, 8, val2 or "-", border=1, ln=1)
+    table.cell(0, 0).text = "№ п/п"
+    table.cell(0, 1).text = ""
+    table.cell(0, 2).text = ""
 
-    table_row("Название проекта", data.get("project_name", "-"),
-              "Номер двигателя", data.get("engine_number", "-"))
-    table_row("Номер проекта", data.get("project_number", "-"),
-              "Номер агрегата", data.get("unit_number", "-"))
-    table_row("Наработка мотто-часов", data.get("moto_hours", "-"),
-              "Количество стартов", data.get("start_count", "-"))
-
-    pdf.ln(5)
-
-    # Описание проблемы
-    pdf.set_font('Arial', '', 11)
-    pdf.cell(0, 8, "Описание проблемы:", ln=1, border=0)
-    pdf.multi_cell(0, 8, data.get("problem_description", "-"), border=1)
-
-    pdf.ln(5)
-
-    # Прилагаемые материалы
-    pdf.set_font('Arial', '', 11)
-    pdf.cell(0, 8, "Прилагаемые материалы:", ln=1, border=0)
-    files = data.get("attached_files", [])
-    temp_photos = []
-    if files:
-        photo_count = 1
-        for f in files:
-            if f['type'] == 'photo' and f.get('photo_path') and os.path.exists(f['photo_path']):
-                try:
-                    pdf.cell(0, 8, f"Фото {photo_count}", ln=1, border=1)
-                    # Вставляем фото, ширина 100мм, сохраняем пропорции
-                    pdf.image(f['photo_path'], w=100)
-                    temp_photos.append(f['photo_path'])
-                    photo_count += 1
-                except Exception:
-                    pdf.cell(0, 8, f"Фото {photo_count} (ошибка вставки)", ln=1, border=1)
-                    photo_count += 1
-            elif f['type'] == 'document':
-                label = f.get("file_name") or f["file_id"]
-                pdf.cell(0, 8, f"Документ: {label}", ln=1, border=1)
-    else:
-        pdf.cell(0, 8, "—", ln=1, border=1)
-
-    pdf.ln(5)
+    for i, (n, label, value) in enumerate(params):
+        table.cell(i + 1, 0).text = n
+        cell_label = table.cell(i + 1, 1).paragraphs[0]
+        if '\n' in label:
+            ru, en = label.split('\n')
+            styled_run(cell_label, ru + "\n", bold=True, font_size=10)
+            styled_run(cell_label, en, italic=True, font_size=10)
+        else:
+            styled_run(cell_label, label, font_size=10)
+        cell_label.paragraph_format.line_spacing = 1
+        cell_value = table.cell(i + 1, 2)
+        paragraph = cell_value.paragraphs[0]
+        if n != "8":
+            styled_run(paragraph, value, font_size=10)
+        else:
+            files = data.get("attached_files", [])
+            if files:
+                for f in files:
+                    if f['type'] == 'photo' and f.get('photo_path') and os.path.exists(f['photo_path']):
+                        try:
+                            run = paragraph.add_run()
+                            run.add_picture(f['photo_path'], width=Mm(13))
+                            paragraph.add_run("\n")
+                        except Exception:
+                            paragraph.add_run("(ошибка вставки)\n")
+                    elif f['type'] == 'document':
+                        styled_run(paragraph, f"• {f.get('file_name') or f['file_id']}\n", font_size=10)
+            else:
+                styled_run(paragraph, "—", font_size=10)
+        paragraph.paragraph_format.line_spacing = 1
+        # Устанавливаем ширину столбцов
+        table.columns[0].width = col_widths[0]
+        table.columns[1].width = col_widths[1]
+        table.columns[2].width = col_widths[2]
 
     # Запасные части
-    pdf.set_font('Arial', '', 11)
-    pdf.cell(0, 8, "Запасные части, необходимые для устранения проблемы", ln=1, border=0)
+    p = doc.add_paragraph()
+    if '\n' in "Запасные части, необходимые для устранения проблемы\nSpare parts needed":
+        ru, en = "Запасные части, необходимые для устранения проблемы\nSpare parts needed".split('\n')
+        styled_run(p, ru + "\n", bold=True, font_size=10)
+        styled_run(p, en, italic=True, font_size=10)
+    else:
+        styled_run(p, "Запасные части, необходимые для устранения проблемы", bold=True, font_size=10)
+        styled_run(p, "Spare parts needed", font_size=10)
+    p.paragraph_format.line_spacing = 1
     parts = data.get("spare_parts", [])
     if parts:
-        pdf.set_font('Arial', 'B', 11)
-        pdf.cell(60, 8, "Каталожный номер", border=1)
-        pdf.cell(80, 8, "Название", border=1)
-        pdf.cell(30, 8, "Количество", border=1, ln=1)
-        pdf.set_font('Arial', '', 11)
+        table2 = doc.add_table(rows=1, cols=3)
+        table2.style = 'Table Grid'
+        hdr_cells = table2.rows[0].cells
+        for idx, hdr in enumerate(["Каталожный номер\nPartial number", "Название\nDescription", "Количество\nAmount"]):
+            cell = hdr_cells[idx].paragraphs[0]
+            if '\n' in hdr:
+                ru, en = hdr.split('\n')
+                styled_run(cell, ru + "\n", bold=True, font_size=10)
+                styled_run(cell, en, italic=True, font_size=10)
+            else:
+                styled_run(cell, hdr, bold=True, font_size=10)
         for part in parts:
-            pdf.cell(60, 8, part['catalog'], border=1)
-            pdf.cell(80, 8, part['name'], border=1)
-            pdf.cell(30, 8, part['qty'], border=1, ln=1)
+            row = table2.add_row().cells
+            styled_run(row[0].paragraphs[0], part["catalog"], font_size=10)
+            styled_run(row[1].paragraphs[0], part["name"], font_size=10)
+            styled_run(row[2].paragraphs[0], part["qty"], font_size=10)
+            for cell in row:
+                for p in cell.paragraphs:
+                    p.paragraph_format.line_spacing = 1
     else:
-        pdf.cell(0, 8, "—", ln=1, border=1)
+        p = doc.add_paragraph()
+        styled_run(p, "—", font_size=10)
+        p.paragraph_format.line_spacing = 1
 
-    pdf.ln(10)
+    doc.add_paragraph()
 
-    # Подписи
-    pdf.set_font('Arial', '', 11)
-    pdf.cell(0, 8, "Подписи", ln=1, border=0)
-    pdf.ln(3)
+    # Блок подписей — 3 столбца, без границ
+    table3 = doc.add_table(rows=5, cols=3)
+    table3.style = None  # Без стиля, чтобы не было границ
+    col1, col2, col3 = table3.columns
+    col1.width = Cm(6.5)
+    col2.width = Cm(5.0)
+    col3.width = Cm(6.5)
 
-    company = data.get("company_name", "________________")
-    sender = data.get("sender_name", "_____________________")
+    # Первая колонка — Гринтех
+    styled_run(table3.cell(0, 0).paragraphs[0], 'ООО «ГринТех Энерджи»', font_size=9)
+    styled_run(table3.cell(1, 0).paragraphs[0], 'GreenTech Energy LLC', font_size=9)
+    table3.cell(3, 0).paragraphs[0].alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    styled_run(table3.cell(3, 0).paragraphs[0], '_____________________/______________/', font_size=9)
 
-    pdf.cell(95, 8, company, ln=0)
-    pdf.cell(0, 8, "ООО «ГринТех Энерджи»", ln=1)
+    # Центр — дата
+    table3.cell(0, 1).paragraphs[0].alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    styled_run(table3.cell(0, 1).paragraphs[0], 'Дата / Date', font_size=9)
 
-    pdf.cell(95, 8, f"{sender}/______________/", ln=0)
-    pdf.cell(0, 8, "_____________________/______________/", ln=1)
+    # Правая колонка — компания пользователя
+    styled_run(table3.cell(0, 2).paragraphs[0], f'«{today.day}» {today.month} {today.year} г.', font_size=9)
+    table3.cell(3, 2).paragraphs[0].alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    styled_run(table3.cell(3, 2).paragraphs[0], '___________________/__________________/', font_size=9)
 
-    pdf.cell(95, 8, f"Дата: {today}", ln=0)
-    pdf.cell(0, 8, "", ln=1)
+    for row in table3.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                p.paragraph_format.line_spacing = 1
 
-    file_path = f"zayavlenie_{data.get('engine_number', 'no_engine')}.pdf"
-    pdf.output(file_path)
-    return file_path, temp_photos
+    file_path = f"zayavlenie_{data.get('engine_number', 'no_engine')}.docx"
+    doc.save(file_path)
+    return file_path
 
-def send_pdf_to_email(pdf_path, subject, body, to_email):
+
+def send_files_to_email(file_paths, subject, body, to_email):
     from_email = SMTP_USER
     if not all([SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASSWORD]):
         print('SMTP credentials are not set.')
@@ -334,10 +424,17 @@ def send_pdf_to_email(pdf_path, subject, body, to_email):
     msg['From'] = from_email
     msg['To'] = to_email
     msg.set_content(body)
-    with open(pdf_path, 'rb') as f:
-        file_data = f.read()
-        file_name = os.path.basename(pdf_path)
-    msg.add_attachment(file_data, maintype='application', subtype='pdf', filename=file_name)
+    for file_path in file_paths:
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
+            file_name = os.path.basename(file_path)
+        maintype = 'application'
+        subtype = 'octet-stream'
+        if file_name.endswith('.pdf'):
+            subtype = 'pdf'
+        elif file_name.endswith('.xlsx'):
+            subtype = 'vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        msg.add_attachment(file_data, maintype=maintype, subtype=subtype, filename=file_name)
     try:
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
             server.starttls()
@@ -345,6 +442,7 @@ def send_pdf_to_email(pdf_path, subject, body, to_email):
             server.send_message(msg)
     except Exception as e:
         print(f'Error sending email: {e}')
+
 
 if __name__ == '__main__':
     bot.polling(none_stop=True)
